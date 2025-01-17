@@ -11,6 +11,7 @@ from utils.embeddings import generate_embeddings, embed_query
 from utils.vector_store import store_embeddings_in_pinecone, query_embeddings_pinecone
 from datetime import datetime
 import json
+from fastapi.encoders import jsonable_encoder
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -71,8 +72,8 @@ async def upload_file(session_id: str, file: UploadFile = File(...)):
 async def query(question: str, session_id: str):
     try:
         # if query size is greater than 512, trim it
-        if len(question) > 512:
-            question = question[:512]
+        if len(question) > 100:
+            question = question[:100]
 
         # Generate embedding for the user's query
         query_embedding = embed_query(question)
@@ -80,27 +81,19 @@ async def query(question: str, session_id: str):
         # Query the Pinecone vector database
         results = query_embeddings_pinecone(query_embedding, session_id)
 
-        return {
-            "results": results
-        }
-
-        # Extract relevant chunks and citations
-        matches = [
-            {
-                "text": res["metadata"]["text"],
-                "page_number": res["metadata"]["page_number"],
-                "file_name": res["metadata"]["file_name"],
-                "score": res["score"]
-            }
-            for res in results["matches"]
-        ]
+        # print(results)
+        # return {
+        #     "results": "working"
+        # }
 
         # Combine chunks as context
         context = "\n".join(
             [f"{res['metadata']['text']}" for res in results["matches"]]
         )
+
         # print("Context:", context)
         token_count = len(tokenizer.encode(context))
+        print("Token count:", token_count)
 
         # Handle context overflow
         # Maximum input size for the model
@@ -124,68 +117,30 @@ async def query(question: str, session_id: str):
             "query": question,
             "answer": answer,
             "citations": [
-                {"page": match["page_number"], "file": match["file_name"]}
-                for match in matches
+                {"page": res["metadata"]["page_number"], "text": res["metadata"]["text"]}
+                for res in results["matches"]
             ]
         }
     except Exception as e:
         # Log and return error details
         print(f"Error during query: {e}")
-        return {
-            "error": str(e)
-        }
-        # return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 def summarize_context(results, max_tokens, tokenizer, model):
     summarized_chunks = []
     total_length = 0
-    
-    for res in results['matches']:
-        try:
-            # Split long text into manageable chunks
+    try:
+        #  we keep adding until we reach the max_tokens limit
+        for res in results['matches']:
             text = res['metadata']['text']
-            chunk_size = 512
-            text_chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-            
-            chunk_summaries = []
-            for chunk in text_chunks:
-                # Safe tokenization with padding and truncation
-                inputs = tokenizer(
-                    chunk,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=512
-                )
-                
-                # Generate summary
-                outputs = model.generate(
-                    **inputs,
-                    max_length=200,
-                    min_length=10,
-                    no_repeat_ngram_size=2,
-                    num_beams=4,
-                    early_stopping=True
-                )
-                
-                chunk_summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                chunk_summaries.append(chunk_summary)
-            
-            # Combine summaries
-            final_summary = " ".join(chunk_summaries)
-            
-            # Check token limit
-            current_length = len(tokenizer.encode(final_summary))
-            if current_length + total_length > max_tokens:
-                # append a trimmed summary to the list and break
-                summarized_chunks.append(final_summary[: max_tokens - total_length])
-                break
-                
-            total_length += current_length
-            summarized_chunks.append(formatted_chunk)
-            
-        except Exception as e:
-            print(f"Error processing chunk: {str(e)}")
-            continue
+            if total_length + len(tokenizer.encode(text)) < max_tokens:
+                summarized_chunks.append(text)
+                total_length += len(tokenizer.encode(text))
+        
+        # Combine the summarized chunks
+        summarized_context = "\n".join(summarized_chunks)
+        return summarized_context
     
-    return "\n\n".join(summarized_chunks) if summarized_chunks else "No summary generated."
+    except Exception as e:
+        print(f"Error processing chunk: {str(e)}")
+        return "No summary generated."
