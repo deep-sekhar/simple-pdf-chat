@@ -1,0 +1,6 @@
+env
+.env
+__pycache__
+parsed_files
+static
+uploaded_files
